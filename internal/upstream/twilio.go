@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pantalk/pantalk/internal/config"
+	"github.com/pantalk/pantalk/internal/formatting"
 	"github.com/pantalk/pantalk/internal/protocol"
 )
 
@@ -160,8 +161,12 @@ func (t *TwilioConnector) pollLoop(ctx context.Context) {
 }
 
 func (t *TwilioConnector) Send(ctx context.Context, request protocol.Request) (protocol.Event, error) {
-	text := strings.TrimSpace(request.Text)
-	if text == "" {
+	segments, err := prepareTwilioSegments(request.Format, request.Text)
+	if err != nil {
+		return protocol.Event{}, err
+	}
+
+	if len(segments) == 0 {
 		return protocol.Event{}, fmt.Errorf("text cannot be empty")
 	}
 
@@ -172,55 +177,61 @@ func (t *TwilioConnector) Send(ctx context.Context, request protocol.Request) (p
 
 	t.rememberChannel(toNumber)
 
-	data := url.Values{}
-	data.Set("To", toNumber)
-	data.Set("From", t.phoneNumber)
-	data.Set("Body", text)
-
 	apiURL := fmt.Sprintf("%s/2010-04-01/Accounts/%s/Messages.json", t.baseURL, t.accountSID)
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		return protocol.Event{}, err
-	}
-	httpReq.SetBasicAuth(t.accountSID, t.authToken)
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	var lastEvent protocol.Event
+	for _, segmentText := range segments {
+		data := url.Values{}
+		data.Set("To", toNumber)
+		data.Set("From", t.phoneNumber)
+		data.Set("Body", segmentText)
 
-	resp, err := t.httpClient.Do(httpReq)
-	if err != nil {
-		return protocol.Event{}, err
-	}
-	defer resp.Body.Close()
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, strings.NewReader(data.Encode()))
+		if reqErr != nil {
+			return protocol.Event{}, reqErr
+		}
+		httpReq.SetBasicAuth(t.accountSID, t.authToken)
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return protocol.Event{}, fmt.Errorf("twilio send failed: status %d", resp.StatusCode)
+		resp, doErr := t.httpClient.Do(httpReq)
+		if doErr != nil {
+			return protocol.Event{}, doErr
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			resp.Body.Close()
+			return protocol.Event{}, fmt.Errorf("twilio send failed: status %d", resp.StatusCode)
+		}
+
+		var sendResp twilioSendResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&sendResp)
+		resp.Body.Close()
+		if decodeErr != nil {
+			return protocol.Event{}, decodeErr
+		}
+
+		target := request.Target
+		if target == "" {
+			target = "phone:" + toNumber
+		}
+
+		event := protocol.Event{
+			Timestamp: parseTwilioDate(sendResp.DateCreated),
+			Service:   t.serviceName,
+			Bot:       t.botName,
+			Kind:      "message",
+			Direction: "out",
+			User:      t.Identity(),
+			Target:    target,
+			Channel:   toNumber,
+			Thread:    sendResp.SID,
+			Text:      segmentText,
+		}
+		t.publish(event)
+		lastEvent = event
 	}
 
-	var sendResp twilioSendResponse
-	if err := json.NewDecoder(resp.Body).Decode(&sendResp); err != nil {
-		return protocol.Event{}, err
-	}
-
-	target := request.Target
-	if target == "" {
-		target = "phone:" + toNumber
-	}
-
-	event := protocol.Event{
-		Timestamp: parseTwilioDate(sendResp.DateCreated),
-		Service:   t.serviceName,
-		Bot:       t.botName,
-		Kind:      "message",
-		Direction: "out",
-		User:      t.Identity(),
-		Target:    target,
-		Channel:   toNumber,
-		Thread:    sendResp.SID,
-		Text:      text,
-	}
-	t.publish(event)
-
-	return event, nil
+	return lastEvent, nil
 }
 
 func (t *TwilioConnector) Identity() string {
@@ -374,6 +385,31 @@ func (t *TwilioConnector) sleepOrDone(ctx context.Context, wait time.Duration) {
 	case <-ctx.Done():
 	case <-time.After(wait):
 	}
+}
+
+// prepareTwilioSegments converts the message to plain text (SMS has no markup
+// support) and splits it to respect the Twilio 1600-character body limit.
+func prepareTwilioSegments(format string, text string) ([]string, error) {
+	normalizedFormat, err := formatting.NormalizeFormat(format)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	// SMS has no markup support; convert formatted text to plain.
+	switch normalizedFormat {
+	case formatting.FormatMarkdown:
+		trimmed = formatting.MarkdownToPlain(trimmed)
+	case formatting.FormatHTML:
+		trimmed = formatting.StripHTML(trimmed)
+	}
+
+	// Twilio SMS body limit is 1600 characters.
+	return formatting.SplitText(trimmed, 1600), nil
 }
 
 // resolveTwilioChannel extracts a phone number from the request's channel or

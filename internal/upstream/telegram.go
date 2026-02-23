@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pantalk/pantalk/internal/config"
+	"github.com/pantalk/pantalk/internal/formatting"
 	"github.com/pantalk/pantalk/internal/protocol"
 )
 
@@ -83,6 +84,7 @@ type tgUser struct {
 type tgSendMessageRequest struct {
 	ChatID           string `json:"chat_id"`
 	Text             string `json:"text"`
+	ParseMode        string `json:"parse_mode,omitempty"`
 	MessageThreadID  int64  `json:"message_thread_id,omitempty"`
 	ReplyToMessageID int64  `json:"reply_to_message_id,omitempty"`
 }
@@ -90,6 +92,11 @@ type tgSendMessageRequest struct {
 type tgSendMessageResponse struct {
 	OK     bool      `json:"ok"`
 	Result tgMessage `json:"result"`
+}
+
+type telegramOutboundSegment struct {
+	Text      string
+	ParseMode string
 }
 
 func NewTelegramConnector(bot config.BotConfig, publish func(protocol.Event)) (*TelegramConnector, error) {
@@ -229,68 +236,83 @@ func (t *TelegramConnector) Send(ctx context.Context, request protocol.Request) 
 	}
 	t.rememberChannel(chatID)
 
-	payload := tgSendMessageRequest{ChatID: chatID, Text: text}
-	if request.Thread != "" {
-		if threadID, err := strconv.ParseInt(request.Thread, 10, 64); err == nil {
-			payload.ReplyToMessageID = threadID
+	segments, err := prepareTelegramSegments(request.Format, request.Text)
+	if err != nil {
+		return protocol.Event{}, err
+	}
+
+	if len(segments) == 0 {
+		return protocol.Event{}, fmt.Errorf("text cannot be empty")
+	}
+
+	var lastEvent protocol.Event
+	for _, segment := range segments {
+		payload := tgSendMessageRequest{ChatID: chatID, Text: segment.Text, ParseMode: segment.ParseMode}
+		if request.Thread != "" {
+			if threadID, parseErr := strconv.ParseInt(request.Thread, 10, 64); parseErr == nil {
+				payload.ReplyToMessageID = threadID
+			}
 		}
+
+		body, marshalErr := json.Marshal(payload)
+		if marshalErr != nil {
+			return protocol.Event{}, marshalErr
+		}
+
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, t.baseURL+"/sendMessage", bytes.NewReader(body))
+		if reqErr != nil {
+			return protocol.Event{}, reqErr
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		resp, doErr := t.httpClient.Do(httpReq)
+		if doErr != nil {
+			return protocol.Event{}, doErr
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			resp.Body.Close()
+			return protocol.Event{}, fmt.Errorf("telegram sendMessage failed: status %d", resp.StatusCode)
+		}
+
+		var sendResponse tgSendMessageResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&sendResponse)
+		resp.Body.Close()
+		if decodeErr != nil {
+			return protocol.Event{}, decodeErr
+		}
+		if !sendResponse.OK {
+			return protocol.Event{}, fmt.Errorf("telegram sendMessage returned not ok")
+		}
+
+		channel := strconv.FormatInt(sendResponse.Result.Chat.ID, 10)
+		thread := request.Thread
+		if thread == "" && sendResponse.Result.MessageThreadID > 0 {
+			thread = strconv.FormatInt(sendResponse.Result.MessageThreadID, 10)
+		}
+
+		target := request.Target
+		if target == "" {
+			target = "chat:" + channel
+		}
+
+		event := protocol.Event{
+			Timestamp: time.Unix(sendResponse.Result.Date, 0).UTC(),
+			Service:   t.serviceName,
+			Bot:       t.botName,
+			Kind:      "message",
+			Direction: "out",
+			User:      t.Identity(),
+			Target:    target,
+			Channel:   channel,
+			Thread:    thread,
+			Text:      segment.Text,
+		}
+		t.publish(event)
+		lastEvent = event
 	}
 
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return protocol.Event{}, err
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, t.baseURL+"/sendMessage", bytes.NewReader(body))
-	if err != nil {
-		return protocol.Event{}, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := t.httpClient.Do(httpReq)
-	if err != nil {
-		return protocol.Event{}, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return protocol.Event{}, fmt.Errorf("telegram sendMessage failed: status %d", resp.StatusCode)
-	}
-
-	var sendResponse tgSendMessageResponse
-	if err := json.NewDecoder(resp.Body).Decode(&sendResponse); err != nil {
-		return protocol.Event{}, err
-	}
-	if !sendResponse.OK {
-		return protocol.Event{}, fmt.Errorf("telegram sendMessage returned not ok")
-	}
-
-	channel := strconv.FormatInt(sendResponse.Result.Chat.ID, 10)
-	thread := request.Thread
-	if thread == "" && sendResponse.Result.MessageThreadID > 0 {
-		thread = strconv.FormatInt(sendResponse.Result.MessageThreadID, 10)
-	}
-
-	target := request.Target
-	if target == "" {
-		target = "chat:" + channel
-	}
-
-	event := protocol.Event{
-		Timestamp: time.Unix(sendResponse.Result.Date, 0).UTC(),
-		Service:   t.serviceName,
-		Bot:       t.botName,
-		Kind:      "message",
-		Direction: "out",
-		User:      t.Identity(),
-		Target:    target,
-		Channel:   channel,
-		Thread:    thread,
-		Text:      text,
-	}
-	t.publish(event)
-
-	return event, nil
+	return lastEvent, nil
 }
 
 func (t *TelegramConnector) loadSelf(ctx context.Context) error {
@@ -465,6 +487,50 @@ func resolveTelegramChat(request protocol.Request) string {
 	}
 
 	return target
+}
+
+func prepareTelegramSegments(format string, text string) ([]telegramOutboundSegment, error) {
+	normalizedFormat, err := formatting.NormalizeFormat(format)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	var chunks []string
+
+	switch normalizedFormat {
+	case formatting.FormatPlain:
+		chunks = formatting.SplitText(trimmed, 3500)
+	case formatting.FormatHTML:
+		// Split HTML at block-element boundaries so tags are never torn apart.
+		chunks = formatting.SplitHTML(trimmed, 3500)
+	case formatting.FormatMarkdown:
+		// Convert the entire document to HTML first so that multi-paragraph
+		// constructs (fenced code blocks, lists with blank lines, etc.) are
+		// kept intact before splitting.
+		htmlText, convertErr := formatting.MarkdownToHTML(trimmed)
+		if convertErr != nil {
+			return nil, fmt.Errorf("convert markdown to telegram html: %w", convertErr)
+		}
+		chunks = formatting.SplitHTML(htmlText, 3500)
+	}
+
+	segments := make([]telegramOutboundSegment, 0, len(chunks))
+
+	for _, chunk := range chunks {
+		switch normalizedFormat {
+		case formatting.FormatPlain:
+			segments = append(segments, telegramOutboundSegment{Text: chunk})
+		case formatting.FormatHTML, formatting.FormatMarkdown:
+			segments = append(segments, telegramOutboundSegment{Text: chunk, ParseMode: "HTML"})
+		}
+	}
+
+	return segments, nil
 }
 
 // resolveChannelNames resolves any friendly channel references (e.g.

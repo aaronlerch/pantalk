@@ -15,6 +15,7 @@ import (
 	"github.com/slack-go/slack/socketmode"
 
 	"github.com/pantalk/pantalk/internal/config"
+	"github.com/pantalk/pantalk/internal/formatting"
 	"github.com/pantalk/pantalk/internal/protocol"
 )
 
@@ -167,42 +168,55 @@ func (s *SlackConnector) Send(ctx context.Context, request protocol.Request) (pr
 
 	s.rememberChannel(channel)
 
+	segments, err := prepareSlackSegments(request.Format, request.Text)
+	if err != nil {
+		return protocol.Event{}, err
+	}
+
+	if len(segments) == 0 {
+		return protocol.Event{}, fmt.Errorf("text cannot be empty")
+	}
+
 	parameters := slack.PostMessageParameters{}
 	if request.Thread != "" {
 		parameters.ThreadTimestamp = request.Thread
 	}
 
-	messageOptions := []slack.MsgOption{
-		slack.MsgOptionText(trimmed, false),
-		slack.MsgOptionPostMessageParameters(parameters),
+	var lastEvent protocol.Event
+	for _, segmentText := range segments {
+		messageOptions := []slack.MsgOption{
+			slack.MsgOptionText(segmentText, false),
+			slack.MsgOptionPostMessageParameters(parameters),
+		}
+
+		postedChannel, postedTS, postErr := s.api.PostMessageContext(ctx, channel, messageOptions...)
+		if postErr != nil {
+			return protocol.Event{}, postErr
+		}
+
+		target := request.Target
+		if target == "" {
+			target = "channel:" + postedChannel
+		}
+
+		event := protocol.Event{
+			Timestamp: parseSlackTimestamp(postedTS),
+			Service:   s.serviceName,
+			Bot:       s.botName,
+			Kind:      "message",
+			Direction: "out",
+			User:      s.Identity(),
+			Target:    target,
+			Channel:   postedChannel,
+			Thread:    request.Thread,
+			Text:      segmentText,
+		}
+
+		s.publish(event)
+		lastEvent = event
 	}
 
-	postedChannel, postedTS, err := s.api.PostMessageContext(ctx, channel, messageOptions...)
-	if err != nil {
-		return protocol.Event{}, err
-	}
-
-	target := request.Target
-	if target == "" {
-		target = "channel:" + postedChannel
-	}
-
-	event := protocol.Event{
-		Timestamp: parseSlackTimestamp(postedTS),
-		Service:   s.serviceName,
-		Bot:       s.botName,
-		Kind:      "message",
-		Direction: "out",
-		User:      s.Identity(),
-		Target:    target,
-		Channel:   postedChannel,
-		Thread:    request.Thread,
-		Text:      trimmed,
-	}
-
-	s.publish(event)
-
-	return event, nil
+	return lastEvent, nil
 }
 
 // React adds an emoji reaction to a message. Channel and Thread (message
@@ -437,6 +451,25 @@ func resolveSlackChannel(request protocol.Request) string {
 	}
 
 	return target
+}
+
+func prepareSlackSegments(format string, text string) ([]string, error) {
+	normalizedFormat, err := formatting.NormalizeFormat(format)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	// Slack does not render HTML; strip tags when the format is HTML.
+	if normalizedFormat == formatting.FormatHTML {
+		trimmed = formatting.StripHTML(trimmed)
+	}
+
+	return formatting.SplitText(trimmed, 30000), nil
 }
 
 func parseSlackTimestamp(ts string) time.Time {

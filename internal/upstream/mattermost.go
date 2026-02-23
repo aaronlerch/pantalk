@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/pantalk/pantalk/internal/config"
+	"github.com/pantalk/pantalk/internal/formatting"
 	"github.com/pantalk/pantalk/internal/protocol"
 )
 
@@ -132,58 +133,73 @@ func (m *MattermostConnector) Send(ctx context.Context, request protocol.Request
 
 	m.rememberChannel(channel)
 
-	bodyPayload := mmCreatePostRequest{ChannelID: channel, Message: trimmed}
-	if request.Thread != "" {
-		bodyPayload.RootID = request.Thread
-	}
-
-	body, err := json.Marshal(bodyPayload)
+	segments, err := prepareMattermostSegments(request.Format, request.Text)
 	if err != nil {
 		return protocol.Event{}, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.endpoint+"/api/v4/posts", bytes.NewReader(body))
-	if err != nil {
-		return protocol.Event{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+m.token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := m.httpClient.Do(req)
-	if err != nil {
-		return protocol.Event{}, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return protocol.Event{}, fmt.Errorf("mattermost post failed: status %d", resp.StatusCode)
+	if len(segments) == 0 {
+		return protocol.Event{}, fmt.Errorf("text cannot be empty")
 	}
 
-	var posted mmPost
-	if err := json.NewDecoder(resp.Body).Decode(&posted); err != nil {
-		return protocol.Event{}, err
+	var lastEvent protocol.Event
+	for _, segmentText := range segments {
+		bodyPayload := mmCreatePostRequest{ChannelID: channel, Message: segmentText}
+		if request.Thread != "" {
+			bodyPayload.RootID = request.Thread
+		}
+
+		body, marshalErr := json.Marshal(bodyPayload)
+		if marshalErr != nil {
+			return protocol.Event{}, marshalErr
+		}
+
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, m.endpoint+"/api/v4/posts", bytes.NewReader(body))
+		if reqErr != nil {
+			return protocol.Event{}, reqErr
+		}
+		httpReq.Header.Set("Authorization", "Bearer "+m.token)
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		resp, doErr := m.httpClient.Do(httpReq)
+		if doErr != nil {
+			return protocol.Event{}, doErr
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			resp.Body.Close()
+			return protocol.Event{}, fmt.Errorf("mattermost post failed: status %d", resp.StatusCode)
+		}
+
+		var posted mmPost
+		decodeErr := json.NewDecoder(resp.Body).Decode(&posted)
+		resp.Body.Close()
+		if decodeErr != nil {
+			return protocol.Event{}, decodeErr
+		}
+
+		target := request.Target
+		if target == "" {
+			target = "channel:" + posted.ChannelID
+		}
+
+		event := protocol.Event{
+			Timestamp: time.UnixMilli(posted.CreateAt).UTC(),
+			Service:   m.serviceName,
+			Bot:       m.botName,
+			Kind:      "message",
+			Direction: "out",
+			User:      m.Identity(),
+			Target:    target,
+			Channel:   posted.ChannelID,
+			Thread:    posted.RootID,
+			Text:      segmentText,
+		}
+		m.publish(event)
+		lastEvent = event
 	}
 
-	target := request.Target
-	if target == "" {
-		target = "channel:" + posted.ChannelID
-	}
-
-	event := protocol.Event{
-		Timestamp: time.UnixMilli(posted.CreateAt).UTC(),
-		Service:   m.serviceName,
-		Bot:       m.botName,
-		Kind:      "message",
-		Direction: "out",
-		User:      m.Identity(),
-		Target:    target,
-		Channel:   posted.ChannelID,
-		Thread:    posted.RootID,
-		Text:      posted.Message,
-	}
-	m.publish(event)
-
-	return event, nil
+	return lastEvent, nil
 }
 
 func (m *MattermostConnector) runWebsocketLoop(ctx context.Context) {
@@ -420,6 +436,25 @@ func resolveMattermostChannel(request protocol.Request) string {
 	}
 
 	return target
+}
+
+func prepareMattermostSegments(format string, text string) ([]string, error) {
+	normalizedFormat, err := formatting.NormalizeFormat(format)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	// Mattermost does not render HTML; strip tags when the format is HTML.
+	if normalizedFormat == formatting.FormatHTML {
+		trimmed = formatting.StripHTML(trimmed)
+	}
+
+	return formatting.SplitText(trimmed, 12000), nil
 }
 
 // resolveChannelNames resolves any friendly channel names (e.g. "town-square",

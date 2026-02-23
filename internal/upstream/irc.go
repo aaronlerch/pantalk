@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pantalk/pantalk/internal/config"
+	"github.com/pantalk/pantalk/internal/formatting"
 	"github.com/pantalk/pantalk/internal/protocol"
 )
 
@@ -272,8 +273,12 @@ func (c *IRCConnector) handlePrivmsg(prefix string, params []string) {
 }
 
 func (c *IRCConnector) Send(ctx context.Context, request protocol.Request) (protocol.Event, error) {
-	text := strings.TrimSpace(request.Text)
-	if text == "" {
+	segments, err := prepareIRCSegments(request.Format, request.Text)
+	if err != nil {
+		return protocol.Event{}, err
+	}
+
+	if len(segments) == 0 {
 		return protocol.Event{}, fmt.Errorf("text cannot be empty")
 	}
 
@@ -283,27 +288,31 @@ func (c *IRCConnector) Send(ctx context.Context, request protocol.Request) (prot
 	}
 	c.rememberChannel(channel)
 
-	c.sendRaw("PRIVMSG " + channel + " :" + text)
+	var lastEvent protocol.Event
+	for _, segmentText := range segments {
+		c.sendRaw("PRIVMSG " + channel + " :" + segmentText)
 
-	target := request.Target
-	if target == "" {
-		target = "channel:" + channel
+		target := request.Target
+		if target == "" {
+			target = "channel:" + channel
+		}
+
+		event := protocol.Event{
+			Timestamp: time.Now().UTC(),
+			Service:   c.serviceName,
+			Bot:       c.botName,
+			Kind:      "message",
+			Direction: "out",
+			User:      c.Identity(),
+			Target:    target,
+			Channel:   channel,
+			Text:      segmentText,
+		}
+		c.publish(event)
+		lastEvent = event
 	}
 
-	event := protocol.Event{
-		Timestamp: time.Now().UTC(),
-		Service:   c.serviceName,
-		Bot:       c.botName,
-		Kind:      "message",
-		Direction: "out",
-		User:      c.Identity(),
-		Target:    target,
-		Channel:   channel,
-		Text:      text,
-	}
-	c.publish(event)
-
-	return event, nil
+	return lastEvent, nil
 }
 
 func (c *IRCConnector) Identity() string {
@@ -411,6 +420,46 @@ func extractNick(prefix string) string {
 		return prefix[:idx]
 	}
 	return prefix
+}
+
+// prepareIRCSegments converts the message to plain text (IRC has no markup
+// support) and splits it into lines that respect the 512-byte IRC protocol
+// limit.  Newlines in the input produce separate PRIVMSG commands.
+func prepareIRCSegments(format string, text string) ([]string, error) {
+	normalizedFormat, err := formatting.NormalizeFormat(format)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	// IRC has no markup support; convert formatted text to plain.
+	switch normalizedFormat {
+	case formatting.FormatMarkdown:
+		trimmed = formatting.MarkdownToPlain(trimmed)
+	case formatting.FormatHTML:
+		trimmed = formatting.StripHTML(trimmed)
+	}
+
+	// Split on newlines — each line becomes a separate PRIVMSG because the
+	// IRC protocol does not support multi-line messages.
+	lines := strings.Split(trimmed, "\n")
+	var segments []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Each IRC line has a 512-byte protocol limit; use 400 runes as
+		// a conservative text budget after prefix overhead.
+		segments = append(segments, formatting.SplitText(line, 400)...)
+	}
+
+	return segments, nil
 }
 
 func resolveIRCChannel(request protocol.Request) string {

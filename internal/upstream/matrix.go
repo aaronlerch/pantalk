@@ -13,6 +13,7 @@ import (
 	"maunium.net/go/mautrix/id"
 
 	"github.com/pantalk/pantalk/internal/config"
+	"github.com/pantalk/pantalk/internal/formatting"
 	"github.com/pantalk/pantalk/internal/protocol"
 )
 
@@ -193,8 +194,12 @@ func (m *MatrixConnector) handleMessage(evt *event.Event) {
 }
 
 func (m *MatrixConnector) Send(ctx context.Context, request protocol.Request) (protocol.Event, error) {
-	text := strings.TrimSpace(request.Text)
-	if text == "" {
+	segments, err := prepareMatrixSegments(request.Format, request.Text)
+	if err != nil {
+		return protocol.Event{}, err
+	}
+
+	if len(segments) == 0 {
 		return protocol.Event{}, fmt.Errorf("text cannot be empty")
 	}
 
@@ -213,31 +218,44 @@ func (m *MatrixConnector) Send(ctx context.Context, request protocol.Request) (p
 		return protocol.Event{}, fmt.Errorf("matrix client not connected")
 	}
 
-	resp, err := client.SendText(ctx, id.RoomID(roomID), text)
-	if err != nil {
-		return protocol.Event{}, fmt.Errorf("matrix send: %w", err)
+	var lastEvent protocol.Event
+	for _, segment := range segments {
+		content := &event.MessageEventContent{
+			MsgType: event.MsgText,
+			Body:    segment.Body,
+		}
+		if segment.Format != "" {
+			content.Format = event.FormatHTML
+			content.FormattedBody = segment.FormattedBody
+		}
+
+		resp, sendErr := client.SendMessageEvent(ctx, id.RoomID(roomID), event.EventMessage, content)
+		if sendErr != nil {
+			return protocol.Event{}, fmt.Errorf("matrix send: %w", sendErr)
+		}
+
+		target := request.Target
+		if target == "" {
+			target = "room:" + roomID
+		}
+
+		evt := protocol.Event{
+			Timestamp: time.Now().UTC(),
+			Service:   m.serviceName,
+			Bot:       m.botName,
+			Kind:      "message",
+			Direction: "out",
+			User:      m.Identity(),
+			Target:    target,
+			Channel:   roomID,
+			Thread:    string(resp.EventID),
+			Text:      segment.Body,
+		}
+		m.publish(evt)
+		lastEvent = evt
 	}
 
-	target := request.Target
-	if target == "" {
-		target = "room:" + roomID
-	}
-
-	evt := protocol.Event{
-		Timestamp: time.Now().UTC(),
-		Service:   m.serviceName,
-		Bot:       m.botName,
-		Kind:      "message",
-		Direction: "out",
-		User:      m.Identity(),
-		Target:    target,
-		Channel:   roomID,
-		Thread:    string(resp.EventID),
-		Text:      text,
-	}
-	m.publish(evt)
-
-	return evt, nil
+	return lastEvent, nil
 }
 
 func (m *MatrixConnector) Identity() string {
@@ -282,6 +300,64 @@ func (m *MatrixConnector) publishHeartbeat() {
 		Direction: "system",
 		Text:      "upstream session alive",
 	})
+}
+
+// matrixOutboundSegment holds a message chunk ready for Matrix delivery.
+// When Format is set, the message is sent as formatted HTML with a plain-text
+// Body fallback (required by the Matrix spec).
+type matrixOutboundSegment struct {
+	Body          string // plain-text fallback
+	Format        string // "org.matrix.custom.html" or empty
+	FormattedBody string // HTML body or empty
+}
+
+// prepareMatrixSegments splits and formats a message for Matrix.  Markdown and
+// HTML formats are delivered as formatted messages via formatted_body; plain
+// text is sent as-is.
+func prepareMatrixSegments(format string, text string) ([]matrixOutboundSegment, error) {
+	normalizedFormat, err := formatting.NormalizeFormat(format)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	const maxLen = 60000
+	var segments []matrixOutboundSegment
+
+	switch normalizedFormat {
+	case formatting.FormatPlain:
+		for _, chunk := range formatting.SplitText(trimmed, maxLen) {
+			segments = append(segments, matrixOutboundSegment{Body: chunk})
+		}
+
+	case formatting.FormatHTML:
+		for _, chunk := range formatting.SplitHTML(trimmed, maxLen) {
+			segments = append(segments, matrixOutboundSegment{
+				Body:          formatting.StripHTML(chunk),
+				Format:        "org.matrix.custom.html",
+				FormattedBody: chunk,
+			})
+		}
+
+	case formatting.FormatMarkdown:
+		htmlText, convertErr := formatting.MarkdownToHTML(trimmed)
+		if convertErr != nil {
+			return nil, fmt.Errorf("convert markdown to matrix html: %w", convertErr)
+		}
+		for _, chunk := range formatting.SplitHTML(htmlText, maxLen) {
+			segments = append(segments, matrixOutboundSegment{
+				Body:          formatting.StripHTML(chunk),
+				Format:        "org.matrix.custom.html",
+				FormattedBody: chunk,
+			})
+		}
+	}
+
+	return segments, nil
 }
 
 // resolveMatrixRoom extracts a Matrix room ID from the request's channel or

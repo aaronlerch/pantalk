@@ -9,6 +9,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.34
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/slack-go/slack v0.17.3
+	github.com/yuin/goldmark v1.7.16
 	go.mau.fi/whatsmeow v0.0.0-20260219150138-7ae702b1eed4
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1

@@ -21,6 +21,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/pantalk/pantalk/internal/config"
+	"github.com/pantalk/pantalk/internal/formatting"
 	"github.com/pantalk/pantalk/internal/protocol"
 )
 
@@ -209,14 +210,18 @@ func (w *WhatsAppConnector) handleMessage(msg *events.Message) {
 }
 
 func (w *WhatsAppConnector) Send(ctx context.Context, request protocol.Request) (protocol.Event, error) {
-	text := strings.TrimSpace(request.Text)
-	if text == "" {
+	segments, err := prepareWhatsAppSegments(request.Format, request.Text)
+	if err != nil {
+		return protocol.Event{}, err
+	}
+
+	if len(segments) == 0 {
 		return protocol.Event{}, fmt.Errorf("text cannot be empty")
 	}
 
-	chatJID, err := resolveWhatsAppJID(request)
-	if err != nil {
-		return protocol.Event{}, err
+	chatJID, jidErr := resolveWhatsAppJID(request)
+	if jidErr != nil {
+		return protocol.Event{}, jidErr
 	}
 	w.rememberChannel(chatJID.String())
 
@@ -228,34 +233,38 @@ func (w *WhatsAppConnector) Send(ctx context.Context, request protocol.Request) 
 		return protocol.Event{}, fmt.Errorf("whatsapp client not connected")
 	}
 
-	resp, err := client.SendMessage(ctx, chatJID, &waE2E.Message{
-		Conversation: proto.String(text),
-	})
-	if err != nil {
-		return protocol.Event{}, fmt.Errorf("whatsapp send: %w", err)
+	var lastEvent protocol.Event
+	for _, segmentText := range segments {
+		resp, sendErr := client.SendMessage(ctx, chatJID, &waE2E.Message{
+			Conversation: proto.String(segmentText),
+		})
+		if sendErr != nil {
+			return protocol.Event{}, fmt.Errorf("whatsapp send: %w", sendErr)
+		}
+
+		channel := chatJID.String()
+		target := request.Target
+		if target == "" {
+			target = "chat:" + channel
+		}
+
+		event := protocol.Event{
+			Timestamp: resp.Timestamp,
+			Service:   w.serviceName,
+			Bot:       w.botName,
+			Kind:      "message",
+			Direction: "out",
+			User:      w.Identity(),
+			Target:    target,
+			Channel:   channel,
+			Thread:    request.Thread,
+			Text:      segmentText,
+		}
+		w.publish(event)
+		lastEvent = event
 	}
 
-	channel := chatJID.String()
-	target := request.Target
-	if target == "" {
-		target = "chat:" + channel
-	}
-
-	event := protocol.Event{
-		Timestamp: resp.Timestamp,
-		Service:   w.serviceName,
-		Bot:       w.botName,
-		Kind:      "message",
-		Direction: "out",
-		User:      w.Identity(),
-		Target:    target,
-		Channel:   channel,
-		Thread:    request.Thread,
-		Text:      text,
-	}
-	w.publish(event)
-
-	return event, nil
+	return lastEvent, nil
 }
 
 func (w *WhatsAppConnector) Identity() string {
@@ -322,6 +331,33 @@ func extractWhatsAppText(msg *events.Message) string {
 		return strings.TrimSpace(doc.GetCaption())
 	}
 	return ""
+}
+
+// prepareWhatsAppSegments converts the message to plain text and splits it.
+// WhatsApp has its own markdown dialect (*bold*, _italic_, ~strike~, ```code```)
+// that differs from CommonMark.  Rather than risk garbled output, formatted
+// text is stripped to plain.  A future WhatsApp-specific transform could
+// convert CommonMark to WhatsApp's native syntax.
+func prepareWhatsAppSegments(format string, text string) ([]string, error) {
+	normalizedFormat, err := formatting.NormalizeFormat(format)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	switch normalizedFormat {
+	case formatting.FormatMarkdown:
+		trimmed = formatting.MarkdownToPlain(trimmed)
+	case formatting.FormatHTML:
+		trimmed = formatting.StripHTML(trimmed)
+	}
+
+	// WhatsApp messages can be up to ~65536 characters.
+	return formatting.SplitText(trimmed, 65000), nil
 }
 
 // resolveWhatsAppJID parses a WhatsApp JID from the request's channel or
