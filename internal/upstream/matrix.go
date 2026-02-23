@@ -338,3 +338,8 @@ func (m *MatrixConnector) resolveChannelNames(ctx context.Context) {
 		log.Printf("[matrix:%s] resolved room alias %q → %s", m.botName, alias, resolved)
 	}
 }
+
+// React is not supported by the Matrix connector.
+func (m *MatrixConnector) React(_ context.Context, _ protocol.Request) error {
+return fmt.Errorf("reactions are not supported by the matrix connector")
+}

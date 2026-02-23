@@ -446,3 +446,8 @@ func resolveIRCChannel(request protocol.Request) string {
 
 	return target
 }
+
+// React is not supported by the IRC connector.
+func (c *IRCConnector) React(_ context.Context, _ protocol.Request) error {
+return fmt.Errorf("reactions are not supported by the irc connector")
+}

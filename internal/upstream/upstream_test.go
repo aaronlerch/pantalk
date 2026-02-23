@@ -181,6 +181,14 @@ func TestMockConnector_SendEmpty(t *testing.T) {
 	}
 }
 
+func TestMockConnector_ReactNotSupported(t *testing.T) {
+	mock := NewMockConnector("test", "bot", func(ev protocol.Event) {})
+	err := mock.React(nil, protocol.Request{Channel: "C1", Thread: "ts", Emoji: "white_check_mark"})
+	if err == nil {
+		t.Fatal("expected error: mock connector does not support reactions")
+	}
+}
+
 // --- WhatsApp tests ---
 
 func TestResolveWhatsAppJID(t *testing.T) {

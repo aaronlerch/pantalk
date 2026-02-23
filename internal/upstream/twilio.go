@@ -415,3 +415,8 @@ func parseTwilioDate(dateStr string) time.Time {
 
 	return time.Now().UTC()
 }
+
+// React is not supported by the Twilio connector.
+func (t *TwilioConnector) React(_ context.Context, _ protocol.Request) error {
+return fmt.Errorf("reactions are not supported by the twilio connector")
+}

@@ -68,6 +68,11 @@ func (m *MockConnector) Identity() string {
 	return ""
 }
 
+// React is not supported by the mock connector.
+func (m *MockConnector) React(_ context.Context, _ protocol.Request) error {
+	return fmt.Errorf("reactions are not supported by the mock connector")
+}
+
 func (m *MockConnector) Send(_ context.Context, request protocol.Request) (protocol.Event, error) {
 	trimmed := strings.TrimSpace(request.Text)
 	if trimmed == "" {

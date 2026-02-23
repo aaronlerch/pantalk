@@ -538,3 +538,8 @@ func parseIMessageRowID(s string) int64 {
 	v, _ := strconv.ParseInt(s, 10, 64)
 	return v
 }
+
+// React is not supported by the iMessage connector.
+func (c *IMessageConnector) React(_ context.Context, _ protocol.Request) error {
+return fmt.Errorf("reactions are not supported by the imessage connector")
+}

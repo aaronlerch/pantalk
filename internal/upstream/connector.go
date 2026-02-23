@@ -11,6 +11,7 @@ import (
 type Connector interface {
 	Run(ctx context.Context)
 	Send(ctx context.Context, request protocol.Request) (protocol.Event, error)
+	React(ctx context.Context, request protocol.Request) error
 	Identity() string
 }
 

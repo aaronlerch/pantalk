@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/pantalk/pantalk/internal/protocol"
+	"github.com/pantalk/pantalk/internal/upstream"
 )
 
 func TestBotKey(t *testing.T) {
@@ -307,5 +308,47 @@ func TestResolveBotService(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("expected ambiguous error, got: %v", err)
+	}
+}
+
+func TestHandleRequest_React_MissingEmoji(t *testing.T) {
+	s := &Server{
+		bots:       make(map[string]protocol.BotRef),
+		connectors: make(map[string]upstream.Connector),
+	}
+
+	resp := s.handleRequest(nil, protocol.Request{
+		Action: protocol.ActionReact,
+		Bot:    "ops-bot",
+		Emoji:  "",
+	})
+
+	if resp.OK {
+		t.Fatal("expected error response for missing emoji")
+	}
+	if resp.Error == "" {
+		t.Fatal("expected non-empty error message")
+	}
+}
+
+func TestHandleRequest_React_UnknownBot(t *testing.T) {
+	s := &Server{
+		bots: map[string]protocol.BotRef{
+			"slack:ops-bot": {Service: "slack", Name: "ops-bot"},
+		},
+		connectors: make(map[string]upstream.Connector),
+	}
+
+	resp := s.handleRequest(nil, protocol.Request{
+		Action:  protocol.ActionReact,
+		Service: "slack",
+		Bot:     "ops-bot",
+		Channel: "C0123",
+		Thread:  "1700000000.123456",
+		Emoji:   "white_check_mark",
+	})
+
+	if resp.OK {
+		t.Fatal("expected error response for unknown connector")
 	}
 }

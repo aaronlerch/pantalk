@@ -262,6 +262,28 @@ func (d *DiscordConnector) Identity() string {
 	return d.selfUser
 }
 
+// React adds an emoji reaction to a Discord message. Channel and Target
+// (message ID) are required. Emoji can be a unicode character (e.g. "✅") or
+// a custom emoji in "name:id" format (e.g. "thumbsup:123456789").
+func (d *DiscordConnector) React(_ context.Context, request protocol.Request) error {
+	emoji := strings.TrimSpace(request.Emoji)
+	if emoji == "" {
+		return fmt.Errorf("emoji is required")
+	}
+
+	channel := resolveDiscordChannel(request)
+	if channel == "" {
+		return fmt.Errorf("discord react requires channel or target")
+	}
+
+	messageID := strings.TrimSpace(request.Target)
+	if messageID == "" {
+		return fmt.Errorf("discord react requires --target <message-id>")
+	}
+
+	return d.session.MessageReactionAdd(channel, messageID, emoji)
+}
+
 func (d *DiscordConnector) isSelfMessage(message *discordgo.MessageCreate) bool {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

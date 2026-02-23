@@ -7,6 +7,7 @@ const (
 	ActionBots         = "bots"
 	ActionStatus       = "status"
 	ActionSend         = "send"
+	ActionReact        = "react"
 	ActionHistory      = "history"
 	ActionNotify       = "notifications"
 	ActionClearHistory = "clear_history"
@@ -23,6 +24,7 @@ type Request struct {
 	Channel string `json:"channel,omitempty"`
 	Thread  string `json:"thread,omitempty"`
 	Text    string `json:"text,omitempty"`
+	Emoji   string `json:"emoji,omitempty"`
 	Search  string `json:"search,omitempty"`
 	Notify  bool   `json:"notify,omitempty"`
 	Unseen  bool   `json:"unseen,omitempty"`
