@@ -7,6 +7,7 @@ const (
 	ActionBots         = "bots"
 	ActionStatus       = "status"
 	ActionSend         = "send"
+	ActionReact        = "react"
 	ActionHistory      = "history"
 	ActionNotify       = "notifications"
 	ActionClearHistory = "clear_history"
@@ -23,6 +24,7 @@ type Request struct {
 	Channel string `json:"channel,omitempty"`
 	Thread  string `json:"thread,omitempty"`
 	Text    string `json:"text,omitempty"`
+	Emoji   string `json:"emoji,omitempty"`
 	Search  string `json:"search,omitempty"`
 	Notify  bool   `json:"notify,omitempty"`
 	Unseen  bool   `json:"unseen,omitempty"`
@@ -32,13 +34,13 @@ type Request struct {
 }
 
 type Response struct {
-	OK      bool         `json:"ok"`
-	Error   string       `json:"error,omitempty"`
-	Ack     string       `json:"ack,omitempty"`
-	Bots    []BotRef     `json:"bots,omitempty"`
-	Events  []Event      `json:"events,omitempty"`
-	Event   *Event       `json:"event,omitempty"`
-	Cleared int64        `json:"cleared,omitempty"`
+	OK      bool          `json:"ok"`
+	Error   string        `json:"error,omitempty"`
+	Ack     string        `json:"ack,omitempty"`
+	Bots    []BotRef      `json:"bots,omitempty"`
+	Events  []Event       `json:"events,omitempty"`
+	Event   *Event        `json:"event,omitempty"`
+	Cleared int64         `json:"cleared,omitempty"`
 	Status  *DaemonStatus `json:"status,omitempty"`
 }
 

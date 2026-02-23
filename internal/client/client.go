@@ -64,6 +64,8 @@ func Run(service string, toolName string, args []string) int {
 		return runStatus(service, commandArgs)
 	case "send":
 		return runSend(service, commandArgs)
+	case "react":
+		return runReact(service, commandArgs)
 	case "history":
 		return runHistory(service, commandArgs, false)
 	case "notifications", "notify":
@@ -260,6 +262,53 @@ func runSend(service string, args []string) int {
 		}
 	}
 
+	return 0
+}
+
+func runReact(service string, args []string) int {
+	flags := flag.NewFlagSet("react", flag.ContinueOnError)
+	socket := flags.String("socket", defaultSocketPath, "unix socket path")
+	svcFlag := flags.String("service", "", "service name (auto-resolved from bot if omitted)")
+	bot := flags.String("bot", "", "bot name from config")
+	channel := flags.String("channel", "", "channel id containing the message")
+	thread := flags.String("thread", "", "message timestamp / thread id (required for Slack)")
+	target := flags.String("target", "", "message id (required for Discord)")
+	emoji := flags.String("emoji", "", "emoji reaction to add (e.g. white_check_mark, 👍)")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+
+	svc := resolveService(service, *svcFlag)
+
+	if strings.TrimSpace(*bot) == "" {
+		fmt.Fprintln(os.Stderr, "--bot is required")
+		return 2
+	}
+	if strings.TrimSpace(*emoji) == "" {
+		fmt.Fprintln(os.Stderr, "--emoji is required")
+		return 2
+	}
+
+	resp, err := call(*socket, protocol.Request{
+		Action:  protocol.ActionReact,
+		Service: svc,
+		Bot:     *bot,
+		Channel: *channel,
+		Thread:  *thread,
+		Target:  *target,
+		Emoji:   *emoji,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	if !resp.OK {
+		fmt.Fprintln(os.Stderr, resp.Error)
+		return 1
+	}
+
+	fmt.Println(resp.Ack)
 	return 0
 }
 
@@ -547,6 +596,7 @@ Messaging:
   %s bots%s [--json]
   %s status [--json]
   %s send --bot NAME (--text MESSAGE | --text -) (--target ID | --channel ID | --thread ID)%s [--json]
+  %s react --bot NAME --emoji EMOJI (--channel ID | --thread ID | --target ID)%s
   %s history [--bot NAME] [--channel ID] [--thread ID] [--search TEXT] [--notify] [--limit N] [--since ID] [--clear [--all]]%s [--json]
   %s notifications [--bot NAME] [--channel ID] [--thread ID] [--search TEXT] [--unseen] [--limit N] [--since ID] [--clear [--all]]%s [--json]
   %s stream [--bot NAME] [--channel ID] [--thread ID] [--search TEXT] [--notify] [--timeout N]%s [--json]
@@ -571,6 +621,7 @@ JSON output is enabled by default when stdout is not a terminal.
 `, toolName,
 		toolName, svcHint,
 		toolName,
+		toolName, svcHint,
 		toolName, svcHint,
 		toolName, svcHint,
 		toolName, svcHint,

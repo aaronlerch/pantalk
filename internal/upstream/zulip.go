@@ -63,14 +63,14 @@ type zulipEvent struct {
 }
 
 type zulipMessage struct {
-	ID              int64    `json:"id"`
-	SenderID        int64    `json:"sender_id"`
-	SenderEmail     string   `json:"sender_email"`
-	Content         string   `json:"content"`
-	Subject         string   `json:"subject"`
-	Timestamp       int64    `json:"timestamp"`
-	Type            string   `json:"type"`
-	StreamID        int64    `json:"stream_id"`
+	ID               int64           `json:"id"`
+	SenderID         int64           `json:"sender_id"`
+	SenderEmail      string          `json:"sender_email"`
+	Content          string          `json:"content"`
+	Subject          string          `json:"subject"`
+	Timestamp        int64           `json:"timestamp"`
+	Type             string          `json:"type"`
+	StreamID         int64           `json:"stream_id"`
 	DisplayRecipient json.RawMessage `json:"display_recipient"`
 }
 
@@ -562,4 +562,9 @@ func (z *ZulipConnector) getStreamID(ctx context.Context, name string) (int64, e
 func isZulipStreamID(s string) bool {
 	_, err := strconv.ParseInt(s, 10, 64)
 	return err == nil
+}
+
+// React is not supported by the Zulip connector.
+func (z *ZulipConnector) React(_ context.Context, _ protocol.Request) error {
+	return fmt.Errorf("reactions are not supported by the zulip connector")
 }

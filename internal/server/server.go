@@ -455,6 +455,30 @@ func (s *Server) handleRequest(ctx context.Context, req protocol.Request) protoc
 		event.Self = connector.Identity() != "" && event.User == connector.Identity()
 
 		return protocol.Response{OK: true, Ack: fmt.Sprintf("sent event %d", event.ID), Event: &event}
+	case protocol.ActionReact:
+		emoji := strings.TrimSpace(req.Emoji)
+		if emoji == "" {
+			return protocol.Response{OK: false, Error: "emoji is required"}
+		}
+
+		resolvedService, resolvedBot, err := s.resolveBotService(req.Service, req.Bot)
+		if err != nil {
+			return protocol.Response{OK: false, Error: err.Error()}
+		}
+
+		key := botKey(resolvedService, resolvedBot)
+		s.mu.RLock()
+		connector, ok := s.connectors[key]
+		s.mu.RUnlock()
+		if !ok {
+			return protocol.Response{OK: false, Error: fmt.Sprintf("unknown bot %q for service %q", resolvedBot, resolvedService)}
+		}
+
+		if err := connector.React(ctx, req); err != nil {
+			return protocol.Response{OK: false, Error: err.Error()}
+		}
+
+		return protocol.Response{OK: true, Ack: "reacted"}
 	case protocol.ActionReload:
 		if err := s.reloadConfig(); err != nil {
 			return protocol.Response{OK: false, Error: err.Error()}
