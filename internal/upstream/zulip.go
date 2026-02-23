@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pantalk/pantalk/internal/config"
+	"github.com/pantalk/pantalk/internal/formatting"
 	"github.com/pantalk/pantalk/internal/protocol"
 )
 
@@ -301,8 +302,12 @@ func (z *ZulipConnector) getEvents(ctx context.Context, queueID string, lastEven
 }
 
 func (z *ZulipConnector) Send(ctx context.Context, request protocol.Request) (protocol.Event, error) {
-	trimmed := strings.TrimSpace(request.Text)
-	if trimmed == "" {
+	segments, err := prepareZulipSegments(request.Format, request.Text)
+	if err != nil {
+		return protocol.Event{}, err
+	}
+
+	if len(segments) == 0 {
 		return protocol.Event{}, fmt.Errorf("text cannot be empty")
 	}
 
@@ -313,73 +318,79 @@ func (z *ZulipConnector) Send(ctx context.Context, request protocol.Request) (pr
 
 	z.rememberChannel(channel)
 
-	form := url.Values{}
-	form.Set("content", trimmed)
+	var lastEvent protocol.Event
+	for _, segmentText := range segments {
+		form := url.Values{}
+		form.Set("content", segmentText)
 
-	if request.Thread != "" {
-		form.Set("topic", request.Thread)
-	}
-
-	// Determine message type based on channel format
-	if strings.Contains(channel, "@") {
-		// Direct message
-		form.Set("type", "direct")
-		form.Set("to", channel)
-	} else {
-		// Stream message
-		form.Set("type", "stream")
-		form.Set("to", channel)
-		if request.Thread == "" {
-			form.Set("topic", "(no topic)")
+		if request.Thread != "" {
+			form.Set("topic", request.Thread)
 		}
+
+		// Determine message type based on channel format
+		if strings.Contains(channel, "@") {
+			// Direct message
+			form.Set("type", "direct")
+			form.Set("to", channel)
+		} else {
+			// Stream message
+			form.Set("type", "stream")
+			form.Set("to", channel)
+			if request.Thread == "" {
+				form.Set("topic", "(no topic)")
+			}
+		}
+
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, z.endpoint+"/api/v1/messages", strings.NewReader(form.Encode()))
+		if reqErr != nil {
+			return protocol.Event{}, reqErr
+		}
+		req.SetBasicAuth(z.email, z.apiKey)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		resp, doErr := z.httpClient.Do(req)
+		if doErr != nil {
+			return protocol.Event{}, doErr
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			resp.Body.Close()
+			return protocol.Event{}, fmt.Errorf("zulip send failed: status %d", resp.StatusCode)
+		}
+
+		var sendResp zulipSendMessageResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&sendResp)
+		resp.Body.Close()
+		if decodeErr != nil {
+			return protocol.Event{}, decodeErr
+		}
+
+		if sendResp.Result != "success" {
+			return protocol.Event{}, fmt.Errorf("zulip send: %s", sendResp.Msg)
+		}
+
+		target := request.Target
+		if target == "" {
+			target = "channel:" + channel
+		}
+
+		event := protocol.Event{
+			Timestamp: time.Now().UTC(),
+			Service:   z.serviceName,
+			Bot:       z.botName,
+			Kind:      "message",
+			Direction: "out",
+			User:      z.Identity(),
+			Target:    target,
+			Channel:   channel,
+			Thread:    request.Thread,
+			Text:      segmentText,
+		}
+		z.publish(event)
+		lastEvent = event
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, z.endpoint+"/api/v1/messages", strings.NewReader(form.Encode()))
-	if err != nil {
-		return protocol.Event{}, err
-	}
-	req.SetBasicAuth(z.email, z.apiKey)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := z.httpClient.Do(req)
-	if err != nil {
-		return protocol.Event{}, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return protocol.Event{}, fmt.Errorf("zulip send failed: status %d", resp.StatusCode)
-	}
-
-	var sendResp zulipSendMessageResponse
-	if err := json.NewDecoder(resp.Body).Decode(&sendResp); err != nil {
-		return protocol.Event{}, err
-	}
-
-	if sendResp.Result != "success" {
-		return protocol.Event{}, fmt.Errorf("zulip send: %s", sendResp.Msg)
-	}
-
-	target := request.Target
-	if target == "" {
-		target = "channel:" + channel
-	}
-
-	event := protocol.Event{
-		Timestamp: time.Now().UTC(),
-		Service:   z.serviceName,
-		Bot:       z.botName,
-		Kind:      "message",
-		Direction: "out",
-		User:      z.Identity(),
-		Target:    target,
-		Channel:   channel,
-		Thread:    request.Thread,
-		Text:      trimmed,
-	}
-	z.publish(event)
-
-	return event, nil
+	return lastEvent, nil
 }
 
 func (z *ZulipConnector) loadSelfUser(ctx context.Context) error {
@@ -478,6 +489,31 @@ func (z *ZulipConnector) sleepOrDone(ctx context.Context, wait time.Duration) {
 	case <-ctx.Done():
 	case <-time.After(wait):
 	}
+}
+
+// prepareZulipSegments formats and splits a message for Zulip.  Zulip renders
+// Markdown natively, so markdown input passes through unchanged.  HTML is not
+// supported in Zulip message content and is stripped to plain text.
+func prepareZulipSegments(format string, text string) ([]string, error) {
+	normalizedFormat, err := formatting.NormalizeFormat(format)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	// Zulip renders Markdown natively.  HTML is not supported in message
+	// content, so strip tags when the format is HTML.
+	if normalizedFormat == formatting.FormatHTML {
+		trimmed = formatting.StripHTML(trimmed)
+	}
+	// FormatMarkdown and FormatPlain pass through unchanged.
+
+	// Zulip message limit is ~10000 characters.
+	return formatting.SplitText(trimmed, 10000), nil
 }
 
 func resolveZulipChannel(request protocol.Request) string {

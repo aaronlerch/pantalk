@@ -202,6 +202,7 @@ func runSend(service string, args []string) int {
 	channel := flags.String("channel", "", "channel destination id")
 	thread := flags.String("thread", "", "thread id")
 	text := flags.String("text", "", "message text (use - to read from stdin)")
+	format := flags.String("format", "plain", "message format (plain, markdown, html)")
 	jsonOut := flags.Bool("json", !isTTY(), "output as JSON (default when stdout is not a terminal)")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -243,6 +244,7 @@ func runSend(service string, args []string) int {
 		Channel: *channel,
 		Thread:  *thread,
 		Text:    messageText,
+		Format:  *format,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -595,7 +597,7 @@ func printUsage(toolName string) {
 Messaging:
   %s bots%s [--json]
   %s status [--json]
-  %s send --bot NAME (--text MESSAGE | --text -) (--target ID | --channel ID | --thread ID)%s [--json]
+	%s send --bot NAME (--text MESSAGE | --text -) (--target ID | --channel ID | --thread ID) [--format plain|markdown|html]%s [--json]
   %s react --bot NAME --emoji EMOJI (--channel ID | --thread ID | --target ID)%s
   %s history [--bot NAME] [--channel ID] [--thread ID] [--search TEXT] [--notify] [--limit N] [--since ID] [--clear [--all]]%s [--json]
   %s notifications [--bot NAME] [--channel ID] [--thread ID] [--search TEXT] [--unseen] [--limit N] [--since ID] [--clear [--all]]%s [--json]

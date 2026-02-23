@@ -16,6 +16,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/pantalk/pantalk/internal/config"
+	"github.com/pantalk/pantalk/internal/formatting"
 	"github.com/pantalk/pantalk/internal/protocol"
 )
 
@@ -170,8 +171,12 @@ func (c *IMessageConnector) pollLoop(ctx context.Context, db *sql.DB) {
 }
 
 func (c *IMessageConnector) Send(ctx context.Context, request protocol.Request) (protocol.Event, error) {
-	text := strings.TrimSpace(request.Text)
-	if text == "" {
+	segments, err := prepareIMessageSegments(request.Format, request.Text)
+	if err != nil {
+		return protocol.Event{}, err
+	}
+
+	if len(segments) == 0 {
 		return protocol.Event{}, fmt.Errorf("text cannot be empty")
 	}
 
@@ -182,30 +187,34 @@ func (c *IMessageConnector) Send(ctx context.Context, request protocol.Request) 
 
 	c.rememberChannel(recipient)
 
-	if err := c.sendViaAppleScript(ctx, recipient, text); err != nil {
-		return protocol.Event{}, fmt.Errorf("imessage send failed: %w", err)
+	var lastEvent protocol.Event
+	for _, segmentText := range segments {
+		if sendErr := c.sendViaAppleScript(ctx, recipient, segmentText); sendErr != nil {
+			return protocol.Event{}, fmt.Errorf("imessage send failed: %w", sendErr)
+		}
+
+		target := request.Target
+		if target == "" {
+			target = "dm:" + recipient
+		}
+
+		event := protocol.Event{
+			Timestamp: time.Now().UTC(),
+			Service:   c.serviceName,
+			Bot:       c.botName,
+			Kind:      "message",
+			Direction: "out",
+			User:      c.Identity(),
+			Target:    target,
+			Channel:   recipient,
+			Thread:    request.Thread,
+			Text:      segmentText,
+		}
+		c.publish(event)
+		lastEvent = event
 	}
 
-	target := request.Target
-	if target == "" {
-		target = "dm:" + recipient
-	}
-
-	event := protocol.Event{
-		Timestamp: time.Now().UTC(),
-		Service:   c.serviceName,
-		Bot:       c.botName,
-		Kind:      "message",
-		Direction: "out",
-		User:      c.Identity(),
-		Target:    target,
-		Channel:   recipient,
-		Thread:    request.Thread,
-		Text:      text,
-	}
-	c.publish(event)
-
-	return event, nil
+	return lastEvent, nil
 }
 
 func (c *IMessageConnector) Identity() string {
@@ -381,6 +390,12 @@ func (c *IMessageConnector) sendViaAppleScript(ctx context.Context, recipient, t
 	// Escape backslashes and quotes for AppleScript string literals.
 	escapedText := strings.ReplaceAll(text, `\`, `\\`)
 	escapedText = strings.ReplaceAll(escapedText, `"`, `\"`)
+	// Newlines and carriage returns must be escaped to AppleScript \n / \r
+	// so they stay within the quoted string rather than breaking the script
+	// across lines.
+	escapedText = strings.ReplaceAll(escapedText, "\n", `\n`)
+	escapedText = strings.ReplaceAll(escapedText, "\r", `\r`)
+	escapedText = strings.ReplaceAll(escapedText, "\t", `\t`)
 
 	escapedRecipient := strings.ReplaceAll(recipient, `\`, `\\`)
 	escapedRecipient = strings.ReplaceAll(escapedRecipient, `"`, `\"`)
@@ -457,6 +472,32 @@ func (c *IMessageConnector) sleepOrDone(ctx context.Context, wait time.Duration)
 	case <-ctx.Done():
 	case <-time.After(wait):
 	}
+}
+
+// prepareIMessageSegments converts the message to plain text (iMessage via
+// AppleScript has no markup support) and splits it at a safe length.
+func prepareIMessageSegments(format string, text string) ([]string, error) {
+	normalizedFormat, err := formatting.NormalizeFormat(format)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	// iMessage (AppleScript) has no markup support; strip formatting.
+	switch normalizedFormat {
+	case formatting.FormatMarkdown:
+		trimmed = formatting.MarkdownToPlain(trimmed)
+	case formatting.FormatHTML:
+		trimmed = formatting.StripHTML(trimmed)
+	}
+
+	// iMessage has generous limits but AppleScript argument length is
+	// bounded; use 20000 characters as a safe limit.
+	return formatting.SplitText(trimmed, 20000), nil
 }
 
 // resolveIMessageChannel extracts a recipient (phone number or email) from

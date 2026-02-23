@@ -11,6 +11,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/pantalk/pantalk/internal/config"
+	"github.com/pantalk/pantalk/internal/formatting"
 	"github.com/pantalk/pantalk/internal/protocol"
 )
 
@@ -148,38 +149,51 @@ func (d *DiscordConnector) Send(_ context.Context, request protocol.Request) (pr
 
 	d.rememberChannel(channel)
 
-	message := &discordgo.MessageSend{Content: trimmed}
-
-	if request.Thread != "" {
-		message.Reference = &discordgo.MessageReference{MessageID: request.Thread, ChannelID: channel}
-	}
-
-	posted, err := d.session.ChannelMessageSendComplex(channel, message)
+	segments, err := prepareDiscordSegments(request.Format, request.Text)
 	if err != nil {
 		return protocol.Event{}, err
 	}
 
-	target := request.Target
-	if target == "" {
-		target = "channel:" + posted.ChannelID
+	if len(segments) == 0 {
+		return protocol.Event{}, fmt.Errorf("text cannot be empty")
 	}
 
-	event := protocol.Event{
-		Timestamp: posted.Timestamp,
-		Service:   d.serviceName,
-		Bot:       d.botName,
-		Kind:      "message",
-		Direction: "out",
-		User:      d.Identity(),
-		Target:    target,
-		Channel:   posted.ChannelID,
-		Thread:    request.Thread,
-		Text:      trimmed,
+	var lastEvent protocol.Event
+	for _, segmentText := range segments {
+		message := &discordgo.MessageSend{Content: segmentText}
+
+		if request.Thread != "" {
+			message.Reference = &discordgo.MessageReference{MessageID: request.Thread, ChannelID: channel}
+		}
+
+		posted, sendErr := d.session.ChannelMessageSendComplex(channel, message)
+		if sendErr != nil {
+			return protocol.Event{}, sendErr
+		}
+
+		target := request.Target
+		if target == "" {
+			target = "channel:" + posted.ChannelID
+		}
+
+		event := protocol.Event{
+			Timestamp: posted.Timestamp,
+			Service:   d.serviceName,
+			Bot:       d.botName,
+			Kind:      "message",
+			Direction: "out",
+			User:      d.Identity(),
+			Target:    target,
+			Channel:   posted.ChannelID,
+			Thread:    request.Thread,
+			Text:      segmentText,
+		}
+
+		d.publish(event)
+		lastEvent = event
 	}
 
-	d.publish(event)
-
-	return event, nil
+	return lastEvent, nil
 }
 
 func (d *DiscordConnector) onMessageCreate(_ *discordgo.Session, message *discordgo.MessageCreate) {
@@ -320,6 +334,25 @@ func resolveDiscordChannel(request protocol.Request) string {
 	}
 
 	return target
+}
+
+func prepareDiscordSegments(format string, text string) ([]string, error) {
+	normalizedFormat, err := formatting.NormalizeFormat(format)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	// Discord does not render HTML; strip tags when the format is HTML.
+	if normalizedFormat == formatting.FormatHTML {
+		trimmed = formatting.StripHTML(trimmed)
+	}
+
+	return formatting.SplitText(trimmed, 1900), nil
 }
 
 // resolveChannelNames resolves any friendly channel names (e.g. "#general",
