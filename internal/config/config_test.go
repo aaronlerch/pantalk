@@ -755,6 +755,58 @@ bots:
 	}
 }
 
+func TestLoad_MatrixValidConfig(t *testing.T) {
+	path := writeConfig(t, `
+bots:
+  - name: matrix-bot
+    type: matrix
+    endpoint: https://matrix.example.com
+    access_token: matrix-access-token
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Bots) != 1 {
+		t.Fatalf("expected 1 bot, got %d", len(cfg.Bots))
+	}
+	if cfg.Bots[0].Type != "matrix" {
+		t.Fatalf("expected type matrix, got %q", cfg.Bots[0].Type)
+	}
+}
+
+func TestLoad_MatrixMissingEndpoint(t *testing.T) {
+	path := writeConfig(t, `
+bots:
+  - name: matrix-bot
+    type: matrix
+    access_token: matrix-access-token
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for matrix bot missing endpoint")
+	}
+	if !strings.Contains(err.Error(), "endpoint") {
+		t.Errorf("error should mention endpoint, got: %v", err)
+	}
+}
+
+func TestLoad_MatrixMissingAccessToken(t *testing.T) {
+	path := writeConfig(t, `
+bots:
+  - name: matrix-bot
+    type: matrix
+    endpoint: https://matrix.example.com
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for matrix bot missing access_token")
+	}
+	if !strings.Contains(err.Error(), "access_token") {
+		t.Errorf("error should mention access_token, got: %v", err)
+	}
+}
+
 func TestLoad_DiscordMissingBotToken(t *testing.T) {
 	path := writeConfig(t, `
 bots:
