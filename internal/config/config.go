@@ -168,6 +168,13 @@ func validate(cfg Config, allowExec bool) error {
 			if strings.TrimSpace(bot.BotToken) == "" {
 				return fmt.Errorf("bot %q requires bot_token", bot.Name)
 			}
+		case "matrix":
+			if strings.TrimSpace(bot.Endpoint) == "" {
+				return fmt.Errorf("bot %q requires endpoint (Matrix homeserver URL)", bot.Name)
+			}
+			if strings.TrimSpace(bot.AccessToken) == "" {
+				return fmt.Errorf("bot %q requires access_token (Matrix access token)", bot.Name)
+			}
 		case "whatsapp":
 			// No credentials required - authentication is handled via QR code
 			// pairing at first startup. The optional endpoint field overrides

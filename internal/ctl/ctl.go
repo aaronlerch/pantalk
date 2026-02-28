@@ -219,12 +219,20 @@ func runConfigAddBot(args []string) error {
 	flags := flag.NewFlagSet("config add-bot", flag.ContinueOnError)
 	configPath := flags.String("config", defaultConfigPath, "config path")
 	name := flags.String("name", "", "bot name")
-	botType := flags.String("type", "", "bot type (slack, discord, mattermost, telegram, whatsapp)")
+	botType := flags.String("type", "", "bot type (slack, discord, mattermost, telegram, whatsapp, irc, matrix, twilio, zulip, imessage)")
 	botToken := flags.String("bot-token", "", "bot_token (literal or $ENV_VAR)")
 	appLevelToken := flags.String("app-level-token", "", "app_level_token (slack only)")
+	accessToken := flags.String("access-token", "", "access_token (matrix only)")
 	transport := flags.String("transport", "", "custom transport (for non-built-in types)")
-	endpoint := flags.String("endpoint", "", "endpoint (required for mattermost/custom)")
+	endpoint := flags.String("endpoint", "", "endpoint (required for mattermost/irc/matrix/zulip/custom)")
 	channels := flags.String("channels", "", "comma-separated channels")
+	authToken := flags.String("auth-token", "", "auth_token (twilio only)")
+	accountSID := flags.String("account-sid", "", "account_sid (twilio only)")
+	phoneNumber := flags.String("phone-number", "", "phone_number (twilio only)")
+	apiKey := flags.String("api-key", "", "api_key (zulip only)")
+	botEmail := flags.String("bot-email", "", "bot_email (zulip only)")
+	dbPath := flags.String("db-path", "", "db_path (whatsapp/imessage only)")
+	password := flags.String("password", "", "password (irc only)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -249,9 +257,17 @@ func runConfigAddBot(args []string) error {
 		Type:          strings.TrimSpace(*botType),
 		BotToken:      strings.TrimSpace(*botToken),
 		AppLevelToken: strings.TrimSpace(*appLevelToken),
+		AccessToken:   strings.TrimSpace(*accessToken),
 		Transport:     strings.TrimSpace(*transport),
 		Endpoint:      strings.TrimSpace(*endpoint),
 		Channels:      splitCSV(*channels),
+		AuthToken:     strings.TrimSpace(*authToken),
+		AccountSID:    strings.TrimSpace(*accountSID),
+		PhoneNumber:   strings.TrimSpace(*phoneNumber),
+		APIKey:        strings.TrimSpace(*apiKey),
+		BotEmail:      strings.TrimSpace(*botEmail),
+		DBPath:        strings.TrimSpace(*dbPath),
+		Password:      strings.TrimSpace(*password),
 	})
 
 	if err := saveConfigValidated(*configPath, cfg); err != nil {
@@ -368,16 +384,18 @@ func buildBot(reader *bufio.Reader, provider string) (config.BotConfig, error) {
 		return config.BotConfig{}, err
 	}
 
-	botTokenPrompt := fmt.Sprintf("%s bot_token (literal or $ENV_VAR)", provider)
-	botToken, err := promptText(reader, botTokenPrompt, "$"+strings.ToUpper(provider)+"_BOT_TOKEN", true)
-	if err != nil {
-		return config.BotConfig{}, err
+	b := config.BotConfig{
+		Name: botName,
+		Type: provider,
 	}
 
-	b := config.BotConfig{
-		Name:     botName,
-		Type:     provider,
-		BotToken: botToken,
+	if provider == "slack" || provider == "discord" || provider == "mattermost" || provider == "telegram" {
+		botTokenPrompt := fmt.Sprintf("%s bot_token (literal or $ENV_VAR)", provider)
+		botToken, tokenErr := promptText(reader, botTokenPrompt, "$"+strings.ToUpper(provider)+"_BOT_TOKEN", true)
+		if tokenErr != nil {
+			return config.BotConfig{}, tokenErr
+		}
+		b.BotToken = botToken
 	}
 
 	if provider == "slack" {
@@ -396,6 +414,82 @@ func buildBot(reader *bufio.Reader, provider string) (config.BotConfig, error) {
 		b.Endpoint = endpoint
 	}
 
+	if provider == "matrix" {
+		endpoint, endpointErr := promptText(reader, "matrix endpoint (homeserver URL)", "https://matrix.example.com", true)
+		if endpointErr != nil {
+			return config.BotConfig{}, endpointErr
+		}
+		b.Endpoint = endpoint
+
+		accessToken, accessTokenErr := promptText(reader, "matrix access_token (literal or $ENV_VAR)", "$MATRIX_ACCESS_TOKEN", true)
+		if accessTokenErr != nil {
+			return config.BotConfig{}, accessTokenErr
+		}
+		b.AccessToken = accessToken
+	}
+
+	if provider == "irc" {
+		endpoint, endpointErr := promptText(reader, "irc endpoint (host:port)", "irc.libera.chat:6697", true)
+		if endpointErr != nil {
+			return config.BotConfig{}, endpointErr
+		}
+		b.Endpoint = endpoint
+
+		password, passwordErr := promptText(reader, "irc password (optional, literal or $ENV_VAR)", "", false)
+		if passwordErr != nil {
+			return config.BotConfig{}, passwordErr
+		}
+		b.Password = password
+	}
+
+	if provider == "twilio" {
+		authToken, authErr := promptText(reader, "twilio auth_token (literal or $ENV_VAR)", "$TWILIO_AUTH_TOKEN", true)
+		if authErr != nil {
+			return config.BotConfig{}, authErr
+		}
+		b.AuthToken = authToken
+
+		accountSID, sidErr := promptText(reader, "twilio account_sid (literal or $ENV_VAR)", "$TWILIO_ACCOUNT_SID", true)
+		if sidErr != nil {
+			return config.BotConfig{}, sidErr
+		}
+		b.AccountSID = accountSID
+
+		phoneNumber, phoneErr := promptText(reader, "twilio phone_number (E.164)", "+15551234567", true)
+		if phoneErr != nil {
+			return config.BotConfig{}, phoneErr
+		}
+		b.PhoneNumber = phoneNumber
+	}
+
+	if provider == "zulip" {
+		endpoint, endpointErr := promptText(reader, "zulip endpoint", "https://zulip.example.com", true)
+		if endpointErr != nil {
+			return config.BotConfig{}, endpointErr
+		}
+		b.Endpoint = endpoint
+
+		apiKey, apiKeyErr := promptText(reader, "zulip api_key (literal or $ENV_VAR)", "$ZULIP_API_KEY", true)
+		if apiKeyErr != nil {
+			return config.BotConfig{}, apiKeyErr
+		}
+		b.APIKey = apiKey
+
+		botEmail, botEmailErr := promptText(reader, "zulip bot_email (literal or $ENV_VAR)", "$ZULIP_BOT_EMAIL", true)
+		if botEmailErr != nil {
+			return config.BotConfig{}, botEmailErr
+		}
+		b.BotEmail = botEmail
+	}
+
+	if provider == "whatsapp" || provider == "imessage" {
+		dbPath, dbPathErr := promptText(reader, fmt.Sprintf("%s db_path (optional)", provider), "", false)
+		if dbPathErr != nil {
+			return config.BotConfig{}, dbPathErr
+		}
+		b.DBPath = dbPath
+	}
+
 	channelsRaw, channelsErr := promptText(reader, fmt.Sprintf("%s channels (comma-separated, empty for all)", provider), "", false)
 	if channelsErr != nil {
 		return config.BotConfig{}, channelsErr
@@ -411,7 +505,13 @@ func chooseProvider(reader *bufio.Reader) (string, error) {
 	fmt.Println("  2) discord")
 	fmt.Println("  3) mattermost")
 	fmt.Println("  4) telegram")
-	fmt.Println("  5) done")
+	fmt.Println("  5) whatsapp")
+	fmt.Println("  6) irc")
+	fmt.Println("  7) matrix")
+	fmt.Println("  8) twilio")
+	fmt.Println("  9) zulip")
+	fmt.Println(" 10) imessage")
+	fmt.Println(" 11) done")
 
 	choice, err := promptText(reader, "choice", "1", true)
 	if err != nil {
@@ -427,7 +527,19 @@ func chooseProvider(reader *bufio.Reader) (string, error) {
 		return "mattermost", nil
 	case "4", "telegram":
 		return "telegram", nil
-	case "5", "done":
+	case "5", "whatsapp":
+		return "whatsapp", nil
+	case "6", "irc":
+		return "irc", nil
+	case "7", "matrix":
+		return "matrix", nil
+	case "8", "twilio":
+		return "twilio", nil
+	case "9", "zulip":
+		return "zulip", nil
+	case "10", "imessage":
+		return "imessage", nil
+	case "11", "done":
 		return "done", nil
 	default:
 		return "", errors.New("invalid choice")
@@ -669,7 +781,7 @@ func printConfigUsage() {
 Usage:
   pantalk config print [--config %s]
   pantalk config set-server --config <path> [--socket ...] [--db ...] [--history ...]
-  pantalk config add-bot --config <path> --name <bot> --type <type> [--bot-token ...] [--app-level-token ...] [--endpoint ...] [--transport ...] [--channels a,b]
+  pantalk config add-bot --config <path> --name <bot> --type <type> [--bot-token ...] [--app-level-token ...] [--access-token ...] [--endpoint ...] [--auth-token ...] [--account-sid ...] [--phone-number ...] [--api-key ...] [--bot-email ...] [--db-path ...] [--password ...] [--transport ...] [--channels a,b]
   pantalk config remove-bot --config <path> --name <bot>
 `, defaultConfigPath)
 }
