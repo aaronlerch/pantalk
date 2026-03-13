@@ -54,15 +54,19 @@ type Config struct {
 // (e.g. notify, direct, channel).
 type exprEnv struct {
 	// Event fields
-	Notify   bool   `expr:"notify"`
-	Direct   bool   `expr:"direct"`
-	Mentions bool   `expr:"mentions"`
-	Channel  string `expr:"channel"`
-	Thread   string `expr:"thread"`
-	Bot      string `expr:"bot"`
-	Service  string `expr:"service"`
-	User     string `expr:"user"`
-	Text     string `expr:"text"`
+	Notify       bool   `expr:"notify"`
+	Direct       bool   `expr:"direct"`
+	Mentions     bool   `expr:"mentions"`
+	Channel      string `expr:"channel"`
+	Thread       string `expr:"thread"`
+	RawTimestamp string `expr:"raw_ts"`
+	Bot          string `expr:"bot"`
+	Service      string `expr:"service"`
+	User         string `expr:"user"`
+	Text         string `expr:"text"`
+
+	// Lifecycle fields
+	Wake bool `expr:"wake"`
 
 	// Time fields - populated on tick events, zero on message events.
 	Tick    bool   `expr:"tick"`
@@ -229,28 +233,34 @@ func (r *Runner) Matches(event protocol.Event) bool {
 // testing of time-based expressions.
 func (r *Runner) MatchesAt(event protocol.Event, now time.Time) bool {
 	isTick := event.Kind == "tick"
+	isWake := event.Kind == "wake"
 	isMessage := event.Kind == "message" && event.Direction == "in"
 
-	// Accept inbound messages and tick events only.
-	if !isTick && !isMessage {
+	// Accept inbound messages, tick events, and wake events only.
+	if !isTick && !isWake && !isMessage {
 		return false
 	}
 
-	// Don't react to our own messages (not applicable to ticks).
+	// Don't react to our own messages (not applicable to ticks/wakes).
 	if isMessage && event.Self {
 		return false
 	}
 
 	env := exprEnv{
-		Notify:   event.Notify,
-		Direct:   event.Direct,
-		Mentions: event.Mentions,
-		Channel:  event.Channel,
-		Thread:   event.Thread,
-		Bot:      event.Bot,
-		Service:  event.Service,
-		User:     event.User,
-		Text:     event.Text,
+		Notify:       event.Notify,
+		Direct:       event.Direct,
+		Mentions:     event.Mentions,
+		Channel:      event.Channel,
+		Thread:       event.Thread,
+		RawTimestamp: event.RawTimestamp,
+		Bot:          event.Bot,
+		Service:      event.Service,
+		User:         event.User,
+		Text:         event.Text,
+	}
+
+	if isWake {
+		env.Wake = true
 	}
 
 	if isTick {
@@ -400,6 +410,26 @@ func TickEvent() protocol.Event {
 		Kind:      "tick",
 		Timestamp: time.Now().UTC(),
 	}
+}
+
+// WakeEvent returns a synthetic event dispatched when the daemon starts or
+// reconnects. Agents can match on `wake` in their when expressions to run
+// catch-up tasks.
+func WakeEvent() protocol.Event {
+	return protocol.Event{
+		Kind:      "wake",
+		Timestamp: time.Now().UTC(),
+	}
+}
+
+// NeedsWake reports whether this runner's when expression references wake
+// events. Used to determine which agents should receive wake dispatches.
+func (r *Runner) NeedsWake() bool {
+	w := strings.TrimSpace(r.cfg.When)
+	if w == "" {
+		w = "notify"
+	}
+	return strings.Contains(w, "wake")
 }
 
 // Stop cancels any pending buffer timer. Should be called during shutdown.

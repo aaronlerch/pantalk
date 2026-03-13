@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -307,16 +308,17 @@ func (s *SlackConnector) handleMessageEvent(message *slackevents.MessageEvent) {
 	}
 
 	event := protocol.Event{
-		Timestamp: parseSlackTimestamp(message.TimeStamp),
-		Service:   s.serviceName,
-		Bot:       s.botName,
-		Kind:      "message",
-		Direction: "in",
-		User:      message.User,
-		Target:    "channel:" + message.Channel,
-		Channel:   message.Channel,
-		Thread:    message.ThreadTimeStamp,
-		Text:      message.Text,
+		Timestamp:    parseSlackTimestamp(message.TimeStamp),
+		Service:      s.serviceName,
+		Bot:          s.botName,
+		Kind:         "message",
+		Direction:    "in",
+		User:         message.User,
+		Target:       "channel:" + message.Channel,
+		Channel:      message.Channel,
+		Thread:       message.ThreadTimeStamp,
+		RawTimestamp: message.TimeStamp,
+		Text:         message.Text,
 	}
 
 	s.publish(event)
@@ -345,16 +347,17 @@ func (s *SlackConnector) handleAppMentionEvent(mention *slackevents.AppMentionEv
 	}
 
 	event := protocol.Event{
-		Timestamp: parseSlackTimestamp(mention.TimeStamp),
-		Service:   s.serviceName,
-		Bot:       s.botName,
-		Kind:      "message",
-		Direction: "in",
-		User:      mention.User,
-		Target:    "channel:" + mention.Channel,
-		Channel:   mention.Channel,
-		Thread:    mention.ThreadTimeStamp,
-		Text:      mention.Text,
+		Timestamp:    parseSlackTimestamp(mention.TimeStamp),
+		Service:      s.serviceName,
+		Bot:          s.botName,
+		Kind:         "message",
+		Direction:    "in",
+		User:         mention.User,
+		Target:       "channel:" + mention.Channel,
+		Channel:      mention.Channel,
+		Thread:       mention.ThreadTimeStamp,
+		RawTimestamp: mention.TimeStamp,
+		Text:         mention.Text,
 	}
 
 	s.publish(event)
@@ -469,6 +472,13 @@ func prepareSlackSegments(format string, text string) ([]string, error) {
 		trimmed = formatting.StripHTML(trimmed)
 	}
 
+	// Strip markdown backslash escapes (e.g. \! \*) that AI models produce.
+	// These are meaningful in markdown renderers but show as literal
+	// backslashes in Slack's mrkdwn format.
+	if normalizedFormat == formatting.FormatPlain || normalizedFormat == formatting.FormatMarkdown {
+		trimmed = formatting.StripMarkdownEscapes(trimmed)
+	}
+
 	return formatting.SplitText(trimmed, 30000), nil
 }
 
@@ -501,8 +511,11 @@ func (s *SlackConnector) resolveChannelNames(ctx context.Context) {
 	}
 
 	// Fetch all visible conversations to build a name→ID lookup.
+	// Retries up to 3 times on Slack rate limit errors, respecting
+	// the Retry-After duration from the API response.
 	nameToID := make(map[string]string)
 	cursor := ""
+	const maxRetries = 3
 	for {
 		params := &slack.GetConversationsParameters{
 			Types:           []string{"public_channel", "private_channel"},
@@ -510,7 +523,33 @@ func (s *SlackConnector) resolveChannelNames(ctx context.Context) {
 			Cursor:          cursor,
 			ExcludeArchived: true,
 		}
-		channels, nextCursor, err := s.api.GetConversationsContext(ctx, params)
+
+		var channels []slack.Channel
+		var nextCursor string
+		var err error
+
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			channels, nextCursor, err = s.api.GetConversationsContext(ctx, params)
+			if err == nil {
+				break
+			}
+			var rateErr *slack.RateLimitedError
+			if errors.As(err, &rateErr) && attempt < maxRetries {
+				wait := rateErr.RetryAfter
+				if wait <= 0 {
+					wait = time.Duration(attempt+1) * 10 * time.Second
+				}
+				log.Printf("[slack:%s] channel resolution: rate limited, retrying in %s (attempt %d/%d)",
+					s.botName, wait, attempt+1, maxRetries)
+				select {
+				case <-time.After(wait):
+					continue
+				case <-ctx.Done():
+					return
+				}
+			}
+			break
+		}
 		if err != nil {
 			log.Printf("[slack:%s] channel resolution: failed to list conversations: %v", s.botName, err)
 			return

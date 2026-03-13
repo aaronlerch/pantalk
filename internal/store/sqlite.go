@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS events (
 	target TEXT,
 	channel TEXT,
 	thread TEXT,
+	raw_timestamp TEXT NOT NULL DEFAULT '',
 	mentions_agent INTEGER NOT NULL DEFAULT 0,
 	direct_to_agent INTEGER NOT NULL DEFAULT 0,
 	notify INTEGER NOT NULL DEFAULT 0,
@@ -110,6 +111,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 	target TEXT,
 	channel TEXT,
 	thread TEXT,
+	raw_timestamp TEXT NOT NULL DEFAULT '',
 	text TEXT NOT NULL,
 	mentions_agent INTEGER NOT NULL DEFAULT 0,
 	direct_to_agent INTEGER NOT NULL DEFAULT 0,
@@ -123,6 +125,17 @@ CREATE INDEX IF NOT EXISTS idx_notifications_seen ON notifications(service, bot,
 `)
 	if err != nil {
 		return fmt.Errorf("init sqlite schema: %w", err)
+	}
+
+	// Migrate: add raw_timestamp columns to existing databases.
+	// These are no-ops on new databases (column already in CREATE TABLE).
+	// On existing databases, the ALTER succeeds once and silently fails
+	// with "duplicate column" on subsequent opens — which is expected.
+	if !s.hasColumn("events", "raw_timestamp") {
+		s.db.Exec(`ALTER TABLE events ADD COLUMN raw_timestamp TEXT NOT NULL DEFAULT ''`)
+	}
+	if !s.hasColumn("notifications", "raw_timestamp") {
+		s.db.Exec(`ALTER TABLE notifications ADD COLUMN raw_timestamp TEXT NOT NULL DEFAULT ''`)
 	}
 
 	return nil
@@ -161,9 +174,9 @@ func (s *Store) InsertEvent(event protocol.Event) (int64, error) {
 	result, err := s.db.Exec(`
 INSERT INTO events (
 	timestamp_utc, service, bot, kind, direction, user,
-	target, channel, thread,
+	target, channel, thread, raw_timestamp,
 	mentions_agent, direct_to_agent, notify, text
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
 		event.Timestamp.UTC().Format(time.RFC3339Nano),
 		event.Service,
@@ -174,6 +187,7 @@ INSERT INTO events (
 		event.Target,
 		event.Channel,
 		event.Thread,
+		event.RawTimestamp,
 		boolToInt(event.Mentions),
 		boolToInt(event.Direct),
 		boolToInt(event.Notify),
@@ -208,6 +222,7 @@ SELECT
 	target,
 	channel,
 	thread,
+	raw_timestamp,
 	mentions_agent,
 	direct_to_agent,
 	notify,
@@ -289,9 +304,9 @@ func (s *Store) InsertNotification(event protocol.Event) (int64, error) {
 	result, err := s.db.Exec(`
 INSERT INTO notifications (
 	event_id, timestamp_utc, service, bot, kind, direction, user,
-	target, channel, thread, text,
+	target, channel, thread, raw_timestamp, text,
 	mentions_agent, direct_to_agent, notify, seen
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
 `,
 		event.ID,
 		event.Timestamp.UTC().Format(time.RFC3339Nano),
@@ -303,6 +318,7 @@ INSERT INTO notifications (
 		event.Target,
 		event.Channel,
 		event.Thread,
+		event.RawTimestamp,
 		event.Text,
 		boolToInt(event.Mentions),
 		boolToInt(event.Direct),
@@ -338,6 +354,7 @@ SELECT
 	target,
 	channel,
 	thread,
+	raw_timestamp,
 	text,
 	mentions_agent,
 	direct_to_agent,
@@ -637,6 +654,7 @@ func scanEvent(rows *sql.Rows) (protocol.Event, error) {
 		target         sql.NullString
 		channel        sql.NullString
 		thread         sql.NullString
+		rawTimestamp   string
 		text           string
 		mentions       int
 		direct         int
@@ -657,6 +675,7 @@ func scanEvent(rows *sql.Rows) (protocol.Event, error) {
 		&target,
 		&channel,
 		&thread,
+		&rawTimestamp,
 		&text,
 		&mentions,
 		&direct,
@@ -691,6 +710,7 @@ func scanEvent(rows *sql.Rows) (protocol.Event, error) {
 		Target:         target.String,
 		Channel:        channel.String,
 		Thread:         thread.String,
+		RawTimestamp:    rawTimestamp,
 		NotificationID: notificationID,
 		Seen:           seen == 1,
 		SeenAt:         seenAt,
@@ -713,6 +733,7 @@ func scanStoredEvent(rows *sql.Rows) (protocol.Event, error) {
 		target       sql.NullString
 		channel      sql.NullString
 		thread       sql.NullString
+		rawTimestamp string
 		mentions     int
 		direct       int
 		notify       int
@@ -730,6 +751,7 @@ func scanStoredEvent(rows *sql.Rows) (protocol.Event, error) {
 		&target,
 		&channel,
 		&thread,
+		&rawTimestamp,
 		&mentions,
 		&direct,
 		&notify,
@@ -744,21 +766,46 @@ func scanStoredEvent(rows *sql.Rows) (protocol.Event, error) {
 	}
 
 	return protocol.Event{
-		ID:        eventID,
-		Timestamp: timestamp,
-		Service:   service,
-		Bot:       bot,
-		Kind:      kind,
-		Direction: direction,
-		User:      user,
-		Target:    target.String,
-		Channel:   channel.String,
-		Thread:    thread.String,
-		Mentions:  mentions == 1,
-		Direct:    direct == 1,
-		Notify:    notify == 1,
-		Text:      text,
+		ID:           eventID,
+		Timestamp:    timestamp,
+		Service:      service,
+		Bot:          bot,
+		Kind:         kind,
+		Direction:    direction,
+		User:         user,
+		Target:       target.String,
+		Channel:      channel.String,
+		Thread:       thread.String,
+		RawTimestamp: rawTimestamp,
+		Mentions:     mentions == 1,
+		Direct:       direct == 1,
+		Notify:       notify == 1,
+		Text:         text,
 	}, nil
+}
+
+// hasColumn checks whether a table already has a column with the given name.
+// Used to guard ALTER TABLE migrations so they don't fire on every open.
+func (s *Store) hasColumn(table, column string) bool {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			continue
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
 }
 
 func boolToInt(value bool) int {

@@ -12,6 +12,11 @@ import (
 	"github.com/yuin/goldmark/renderer/html"
 )
 
+// markdownEscapeRE matches a backslash followed by a markdown special character.
+// These escapes are produced by AI models (e.g. Claude) and are meaningful in
+// markdown renderers, but show up as literal backslashes in Slack messages.
+var markdownEscapeRE = regexp.MustCompile(`\\([!*_#\[\]()~` + "`" + `>+\-={}.:|\\])`)
+
 // blockCloseTagRE matches the closing tag of any HTML block-level element.
 var blockCloseTagRE = regexp.MustCompile(`(?i)</(p|pre|ul|ol|h[1-6]|blockquote|table|div|li|tr)>`)
 
@@ -106,6 +111,13 @@ func MarkdownToPlain(markdown string) string {
 		return markdown
 	}
 	return StripHTML(htmlStr)
+}
+
+// StripMarkdownEscapes removes backslash escapes before markdown special
+// characters. AI models commonly produce these (e.g. "\!" or "\*") which
+// render correctly in markdown but appear as literal backslashes in Slack.
+func StripMarkdownEscapes(text string) string {
+	return markdownEscapeRE.ReplaceAllString(text, "$1")
 }
 
 func SplitText(text string, maxLen int) []string {

@@ -107,6 +107,11 @@ func (s *Server) Run() error {
 		return err
 	}
 
+	// Dispatch a wake event to agents that opt in. This fires only on
+	// daemon startup (not config reload), allowing agents to run catch-up
+	// tasks (e.g. processing missed notifications while the machine was asleep).
+	s.dispatchWake()
+
 	log.Printf("pantalkd ready (%d bot(s) configured)", len(s.cfg.Bots))
 
 	go func() {
@@ -286,6 +291,27 @@ func (s *Server) dispatchTick() {
 		if runner.Matches(tick) {
 			runner.Handle(tick)
 		}
+	}
+}
+
+// dispatchWake generates a synthetic wake event and dispatches it to all
+// agent runners whose when expression includes "wake".
+func (s *Server) dispatchWake() {
+	wake := agent.WakeEvent()
+
+	s.mu.RLock()
+	runners := s.agents
+	s.mu.RUnlock()
+
+	dispatched := 0
+	for _, runner := range runners {
+		if runner.NeedsWake() && runner.Matches(wake) {
+			runner.Handle(wake)
+			dispatched++
+		}
+	}
+	if dispatched > 0 {
+		log.Printf("wake event dispatched to %d agent(s)", dispatched)
 	}
 }
 

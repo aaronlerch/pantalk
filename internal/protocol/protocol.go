@@ -94,6 +94,7 @@ type Event struct {
 	Target         string     `json:"target,omitempty"`
 	Channel        string     `json:"channel,omitempty"`
 	Thread         string     `json:"thread,omitempty"`
+	RawTimestamp   string     `json:"raw_timestamp,omitempty"`
 	NotificationID int64      `json:"notification_id,omitempty"`
 	Seen           bool       `json:"seen,omitempty"`
 	SeenAt         *time.Time `json:"seen_at,omitempty"`
