@@ -665,6 +665,9 @@ func (s *Server) publish(event protocol.Event) {
 		if s.debug {
 			log.Printf("[%s] debug: target=%s channel=%s thread=%s text=%q", key, event.Target, event.Channel, event.Thread, event.Text)
 		}
+	} else if event.Kind == "reconnected" {
+		log.Printf("[%s] reconnected — dispatching wake", key)
+		go s.dispatchWake()
 	} else if event.Kind == "heartbeat" {
 		if s.debug {
 			log.Printf("[%s] debug: heartbeat", key)

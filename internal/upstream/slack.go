@@ -32,6 +32,7 @@ type SlackConnector struct {
 	selfUser      string
 	selfBotID     string
 	receivedEvent bool
+	hasConnected  bool
 }
 
 func NewSlackConnector(bot config.BotConfig, publish func(protocol.Event)) (*SlackConnector, error) {
@@ -79,8 +80,8 @@ func (s *SlackConnector) Run(ctx context.Context) {
 		}
 
 		if err := s.connectAndRun(ctx); err != nil {
-			log.Printf("[slack:%s] session ended: %v", s.botName, err)
-			s.publishStatus("slack session ended: " + err.Error())
+			log.Printf("[slack:%s] socket mode disconnected: %v", s.botName, err)
+			s.publishStatus("socket mode disconnected: " + err.Error())
 		}
 
 		select {
@@ -248,7 +249,15 @@ func (s *SlackConnector) React(ctx context.Context, request protocol.Request) er
 func (s *SlackConnector) handleSocketEvent(event socketmode.Event) {
 	switch event.Type {
 	case socketmode.EventTypeConnected:
+		s.mu.Lock()
+		reconnect := s.hasConnected
+		s.hasConnected = true
+		s.mu.Unlock()
+
 		s.publishStatus("socket mode connected")
+		if reconnect {
+			s.publishReconnected()
+		}
 	case socketmode.EventTypeConnectionError:
 		if err, ok := event.Data.(error); ok {
 			s.publishStatus("socket mode error: " + err.Error())
@@ -371,6 +380,17 @@ func (s *SlackConnector) publishStatus(text string) {
 		Kind:      "status",
 		Direction: "system",
 		Text:      text,
+	})
+}
+
+func (s *SlackConnector) publishReconnected() {
+	s.publish(protocol.Event{
+		Timestamp: time.Now().UTC(),
+		Service:   s.serviceName,
+		Bot:       s.botName,
+		Kind:      "reconnected",
+		Direction: "system",
+		Text:      "upstream connection restored",
 	})
 }
 
