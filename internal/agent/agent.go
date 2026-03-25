@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/expr-lang/expr"
@@ -348,6 +349,11 @@ func (r *Runner) flush() {
 
 // run executes the agent command. The command is responsible for reading
 // notifications via the pantalk CLI - no events are passed on stdin.
+//
+// The child is placed in its own process group (Setpgid) so that on timeout
+// we can kill the entire tree — not just the direct child. Without this,
+// grandchild processes (e.g. MCP servers spawned by claude) survive the
+// timeout and become orphaned CPU hogs.
 func (r *Runner) run(triggerCount int) {
 	defer func() {
 		r.mu.Lock()
@@ -368,6 +374,20 @@ func (r *Runner) run(triggerCount int) {
 
 	// Direct exec - no shell interpretation.
 	cmd := exec.CommandContext(ctx, r.cfg.Command[0], r.cfg.Command[1:]...)
+
+	// Place the child in its own process group so we can kill the entire
+	// tree on timeout, preventing orphaned grandchild processes.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Disable CommandContext's default behavior of sending SIGKILL to only
+	// the direct child — we handle cleanup ourselves via process group kill.
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			// Kill the entire process group (negative PID).
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
 
 	if r.cfg.Workdir != "" {
 		cmd.Dir = r.cfg.Workdir
